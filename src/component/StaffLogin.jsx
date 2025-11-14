@@ -18,6 +18,7 @@ export default function StaffLogin(){
         try{
             const data=await login(username,password)
             const role=data.role;
+            console.log(data)           
             if (role==="Admin") nav('/admin/dashboard');
             else if (role==="Cashier") nav('/cashier')
             else if (role === 'Waiter') nav('/waiter');
