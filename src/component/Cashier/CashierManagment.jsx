@@ -5,10 +5,17 @@ import OrderDetailsModal from "./components/OrderDetailsModal";
 import BillPrintModal from "./components/BillPrintModal";
 import FilterBar from "./components/FilterBar";
 import OrderList from "./components/OrderList";
+import NewOrderModal from "./components/TakeAwayOrderForm";
 // import { deliveryBoys } from "./cashierData";
-import { getOrders, updateOrderStatus, assignDeliveryPerson } from "./cashierApi";
+import {
+  getOrders,
+  updateOrderStatus,
+  assignDeliveryPerson,
+} from "./cashierApi";
 import toast from "react-hot-toast";
 import instance from "../../api/axiosInstance";
+import useOrdersSocket from "../../hooks/useOrdersSocket";
+import { NavLink, Outlet, useNavigate } from "react-router-dom";
 
 const STATUS_COLORS = {
   pending: "bg-yellow-200 text-yellow-800",
@@ -22,7 +29,8 @@ const STATUS_COLORS = {
 
 const getStatusColor = (status) => {
   if (!status) return STATUS_COLORS["pending"];
-  if (String(status).startsWith("Assigned to")) return STATUS_COLORS["assigned"];
+  if (String(status).startsWith("Assigned to"))
+    return STATUS_COLORS["assigned"];
   return STATUS_COLORS[status] || "bg-gray-200 text-gray-800";
 };
 
@@ -41,14 +49,26 @@ const CashierManagement = () => {
   const [isPrintOpen, setPrintOpen] = useState(false);
   const [filters, setFilters] = useState(defaultFilters);
   const [loading, setLoading] = useState(false);
-  const [deliveryBoys,setDeliveryBoys]=useState([])
+  const [deliveryBoys, setDeliveryBoys] = useState([]);
+  const [showTakeaway, setShowTakeAway] = useState(false);
+  const navigate = useNavigate();
 
-  // load orders
+  const CASHIER_STATUSES = [
+    "served",
+    "in_progress",
+    "pending",
+    "out_for_delivery",
+    "ready",
+  ];
+  const handleMarkCompleted = (id) => {
+    setOrders((prev) => prev.filter((order) => order.id !== id));
+  };
   const fetchOrders = useCallback(async () => {
     try {
       setLoading(true);
       const data = await getOrders();
       setOrders(Array.isArray(data) ? data : []);
+      console.log(data);
     } catch (err) {
       console.error("fetchOrders error:", err);
       toast.error("Failed to fetch orders");
@@ -61,7 +81,34 @@ const CashierManagement = () => {
     fetchOrders();
   }, [fetchOrders]);
 
-  // Handlers
+  const handleMessage = (msg) => {
+    if (!msg || !msg.order) return;
+
+    const incoming = msg.order;
+    const isCashierRelevant = CASHIER_STATUSES.includes(incoming.status);
+
+    setOrders((prev) => {
+      const idx = prev.findIndex((o) => o.id === incoming.id);
+
+      if (!isCashierRelevant) {
+        if (idx >= 0) {
+          return prev.filter((o) => o.id !== incoming.id);
+        }
+        return prev;
+      }
+
+      if (idx >= 0) {
+        const copy = [...prev];
+        copy[idx] = incoming;
+        return copy;
+      }
+
+      return [incoming, ...prev];
+    });
+  };
+
+  useOrdersSocket(handleMessage);
+
   const handleOpenDetails = useCallback((order) => {
     setSelectedOrder(order);
     setDetailsOpen(true);
@@ -82,13 +129,14 @@ const CashierManagement = () => {
     setSelectedOrder(null);
   }, []);
 
-  
   const handleAssignDelivery = useCallback(
     async (orderId, deliveryPersonName) => {
       try {
         const updated = await assignDeliveryPerson(orderId, deliveryPersonName);
-        setOrders((prev) => prev.map((o) => (o.id === updated.id ? updated : o)));
-      
+        setOrders((prev) =>
+          prev.map((o) => (o.id === updated.id ? updated : o)),
+        );
+        // if selected order is same, update it too
         setSelectedOrder((prev) => (prev?.id === updated.id ? updated : prev));
         toast.success(`Assigned to ${deliveryPersonName}`);
       } catch (err) {
@@ -96,27 +144,12 @@ const CashierManagement = () => {
         toast.error("Failed to assign delivery person");
       }
     },
-    []
-  );
-
-  const handleMarkCompleted = useCallback(
-    async (orderId) => {
-      try {
-        const updated = await updateOrderStatus(orderId, "completed");
-        setOrders((prev) => prev.map((o) => (o.id === updated.id ? updated : o)));
-        setSelectedOrder((prev) => (prev?.id === updated.id ? updated : prev));
-        toast.success("Order marked as completed");
-      } catch (err) {
-        console.error("markCompleted error:", err);
-        toast.error("Failed to update order status");
-      }
-    },
-    []
+    [],
   );
 
   const handlePrintBill = useCallback((order) => {
     setSelectedOrder(order);
-    
+
     setPrintOpen(true);
   }, []);
 
@@ -131,10 +164,11 @@ const CashierManagement = () => {
   const filteredOrders = useMemo(() => {
     const q = (filters.search || "").trim().toLowerCase();
     return orders.filter((o) => {
-      console.log(o)
       if (q) {
         const idMatch = String(o.id).toLowerCase().includes(q);
-        const name = (o.name || o.customer || "").toString().toLowerCase();
+        const name = (o.name || o.customer || o.customer_name || "")
+          .toString()
+          .toLowerCase();
         const phone = (o.phone || "").toString().toLowerCase();
         if (!idMatch && !name.includes(q) && !phone.includes(q)) return false;
       }
@@ -156,17 +190,15 @@ const CashierManagement = () => {
     });
   }, [orders, filters]);
 
- 
   const summary = useMemo(() => {
     const totalOrders = orders.length;
     const totalRevenue = orders.reduce((sum, o) => {
-      // prefer serializer total if present
-      if (o.total !== undefined && o.total !== null) return sum + parseFloat(o.total || 0);
-      // otherwise compute from items
+      if (o.total !== undefined && o.total !== null)
+        return sum + parseFloat(o.total || 0);
       const items = o.items || [];
       const orderSum = items.reduce((s, it) => {
         const qty = it.quantity ?? it.qty ?? 0;
-        const price = it.item_price ?? it.price ?? (it.menu_item?.price ?? 0);
+        const price = it.item_price ?? it.price ?? it.menu_item?.price ?? 0;
         return s + qty * price;
       }, 0);
       return sum + orderSum;
@@ -179,7 +211,6 @@ const CashierManagement = () => {
     return { totalOrders, totalRevenue, statusCount };
   }, [orders]);
 
-  // keyboard: close modals on Escape
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === "Escape") {
@@ -192,26 +223,45 @@ const CashierManagement = () => {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const getDeliveryBoys=async()=>{
-    const response=await instance.get(`/users/deliveryBoys/`)
-    const data=response.data
-    console.log(data)
-    setDeliveryBoys(data)
-  }
+  const getDeliveryBoys = async () => {
+    const response = await instance.get(`/users/deliveryBoys/`);
+    const data = response.data;
+    console.log("delivere", data);
+    setDeliveryBoys(data);
+  };
 
-  useEffect(()=>{
-    getDeliveryBoys()
-  },[])
+  useEffect(() => {
+    getDeliveryBoys();
+  }, []);
   return (
     <div className="min-h-screen bg-gray-100 p-6">
       <div className="max-w-7xl mx-auto">
-        <h1 className="text-2xl font-bold mb-4">Cashier — Orders</h1>
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+          <h1 className="text-2xl font-bold">Cashier — Orders</h1>
 
+          <div className="flex gap-2">
+            <button
+              onClick={() => navigate("/cashier/reservations/")}
+              className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-xl shadow transition"
+            >
+              Reservation
+            </button>
+
+            <button
+              onClick={() => navigate("/cashier/takeaway/")}
+              className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-xl shadow transition"
+            >
+              + TakeAway
+            </button>
+          </div>
+        </div>
 
         <FilterBar filters={filters} setFilters={setFilters} />
 
         {loading ? (
-          <div className="text-center text-gray-600 mt-10">Loading orders...</div>
+          <div className="text-center text-gray-600 mt-10">
+            Loading orders...
+          </div>
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-2">
@@ -220,6 +270,7 @@ const CashierManagement = () => {
                 onViewDetails={handleOpenDetails}
                 onPrintBill={handlePrintBill}
                 onAssignDelivery={handleOpenAssignModal}
+                onMarkCompleted={handleMarkCompleted}
               />
             </div>
 
@@ -227,10 +278,14 @@ const CashierManagement = () => {
               <h2 className="text-lg font-semibold mb-3">Orders Summary</h2>
 
               <p className="text-gray-700 mb-2">
-                Total Orders: <span className="font-medium">{summary.totalOrders}</span>
+                Total Orders:{" "}
+                <span className="font-medium">{summary.totalOrders}</span>
               </p>
               <p className="text-gray-700 mb-2">
-                Total Revenue: <span className="font-medium">{summary.totalRevenue.toFixed(2)} AFN</span>
+                Total Revenue:{" "}
+                <span className="font-medium">
+                  {summary.totalRevenue.toFixed(2)} AFN
+                </span>
               </p>
 
               <div className="mt-4">
@@ -239,25 +294,39 @@ const CashierManagement = () => {
                   {Object.entries(summary.statusCount).length === 0 ? (
                     <div className="text-gray-500">No orders yet</div>
                   ) : (
-                    Object.entries(summary.statusCount).map(([status, count]) => (
-                      <div key={status} className="flex justify-between items-center">
-                        <span className={`px-2 py-1 rounded-full text-sm font-medium ${getStatusColor(status)}`}>
-                          {/** show display-friendly label if present on any order */}
-                          {status}
-                        </span>
-                        <span className="font-medium">{count}</span>
-                      </div>
-                    ))
+                    Object.entries(summary.statusCount).map(
+                      ([status, count]) => (
+                        <div
+                          key={status}
+                          className="flex justify-between items-center"
+                        >
+                          <span
+                            className={`px-2 py-1 rounded-full text-sm font-medium ${getStatusColor(status)}`}
+                          >
+                            {/** show display-friendly label if present on any order */}
+                            {status}
+                          </span>
+                          <span className="font-medium">{count}</span>
+                        </div>
+                      ),
+                    )
                   )}
                 </div>
               </div>
+              <Outlet />
 
               <div className="mt-6 flex flex-col gap-2">
-                <button onClick={fetchOrders} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg transition">
+                <button
+                  onClick={fetchOrders}
+                  className="w-full bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg transition"
+                >
                   Refresh Orders
                 </button>
 
-                <button onClick={() => setFilters(defaultFilters)} className="w-full bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded-lg transition">
+                <button
+                  onClick={() => setFilters(defaultFilters)}
+                  className="w-full bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded-lg transition"
+                >
                   Reset Filters
                 </button>
               </div>
@@ -266,14 +335,13 @@ const CashierManagement = () => {
         )}
       </div>
 
-      
       {isDeliveryModalOpen && selectedOrder && (
         <DeliveryAssignmentModal
           isOpen={isDeliveryModalOpen}
           onClose={handleCloseAssignModal}
           order={selectedOrder}
           deliveryPersons={deliveryBoys}
-          onAssign={handleAssignDelivery}
+          onAssign={fetchOrders}
         />
       )}
 
@@ -287,7 +355,12 @@ const CashierManagement = () => {
         />
       )}
 
-      {isPrintOpen && selectedOrder && <BillPrintModal order={selectedOrder} onClose={() => setPrintOpen(false)} />}
+      {isPrintOpen && selectedOrder && (
+        <BillPrintModal
+          order={selectedOrder}
+          onClose={() => setPrintOpen(false)}
+        />
+      )}
     </div>
   );
 };
